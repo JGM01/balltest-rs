@@ -41,14 +41,17 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Distance from fragment to circle center (in local space)
     let dist = length(in.local_pos);
-    
-    // Discard fragments outside the circle
-    if (dist > in.radius) {
-        discard;
-    }
-    
-    // Return color with full alpha
-    return vec4<f32>(in.color, 1.0);
+
+    // How wide the edge should be (in local space)
+    let edge_width = fwidth(dist);
+
+    // Smooth alpha transition at the circle boundary
+    let alpha = 1.0 - smoothstep(
+        in.radius - edge_width,
+        in.radius + edge_width,
+        dist,
+    );
+
+    return vec4<f32>(in.color, alpha);
 }

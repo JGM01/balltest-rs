@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use wgpu::util::DeviceExt;
 use winit::{
@@ -8,6 +11,9 @@ use winit::{
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{Window, WindowId},
 };
+
+const SIM_DT: Duration = Duration::from_millis(8); // 125 Hz
+const FPS_UPDATE_DT: Duration = Duration::from_secs(1);
 
 // Just a structure to encompass the state of the program.
 struct State {
@@ -19,7 +25,7 @@ struct State {
     surface_format: wgpu::TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
 
-    // ECS stuff will go here (positions, colors, radii)
+    // Circle info goes here
     instance_buffer: wgpu::Buffer,
 
     // Verticies for the circles (6 each) (doing quads) (2 triangles)
@@ -35,6 +41,19 @@ struct State {
     atlas: glyphon::TextAtlas,
     text_renderer: glyphon::TextRenderer,
     text_buffer: glyphon::Buffer,
+
+    fps_timer: Instant,
+    fps_frame_count: u32,
+    current_fps: u32,
+
+    last_update: Instant,
+    sim_accumulator: Duration,
+
+    fps_buffer: glyphon::Buffer,
+
+    // text dirtiness
+    text_dirty: bool,
+    fps_dirty: bool,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -260,6 +279,30 @@ impl State {
             ,None,);
         text_buffer.shape_until_scroll(&mut font_system, false);
 
+        let fps_timer = Instant::now();
+        let fps_frame_count = 0;
+        let current_fps = 0;
+
+        // FPS text buffer
+        let mut fps_buffer =
+            glyphon::Buffer::new(&mut font_system, glyphon::Metrics::new(24.0, 32.0));
+        fps_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(size.height as f32),
+        );
+        fps_buffer.set_text(
+            &mut font_system,
+            "FPS: --",
+            &glyphon::Attrs::new().family(glyphon::Family::Monospace),
+            glyphon::Shaping::Advanced,
+            None,
+        );
+        fps_buffer.shape_until_scroll(&mut font_system, false);
+
+        let last_update = Instant::now();
+        let sim_accumulator = Duration::ZERO;
+
         let state = State {
             window,
             device,
@@ -278,6 +321,14 @@ impl State {
             atlas,
             text_renderer,
             text_buffer,
+            fps_timer,
+            fps_frame_count,
+            current_fps,
+            fps_buffer,
+            last_update,
+            sim_accumulator,
+            text_dirty: true,
+            fps_dirty: true,
         };
 
         // Configure surface for the first time
@@ -340,60 +391,141 @@ impl State {
     }
 
     fn render(&mut self) {
-        // Update instance buffer with current circle data
+        // Upload per-instance data
         self.queue.write_buffer(
             &self.instance_buffer,
             0,
             bytemuck::cast_slice(&self.circles),
         );
 
-        let surface_texture = self
-            .surface
-            .get_current_texture()
-            .expect("failed to acquire next swapchain texture");
-        let texture_view = surface_texture
+        let surface_texture = self.surface.get_current_texture().unwrap();
+        let view = surface_texture
             .texture
-            .create_view(&wgpu::TextureViewDescriptor {
-                format: Some(self.surface_format.add_srgb_suffix()),
-                ..Default::default()
-            });
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
 
         {
-            let mut renderpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &texture_view,
-                    depth_slice: None,
+                    view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
+                ..Default::default()
             });
 
-            // Draw circles
-            renderpass.set_pipeline(&self.render_pipeline);
-            renderpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            renderpass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            renderpass.draw(0..6, 0..self.circles.len() as u32);
+            // ---- draw circles ----
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            render_pass.draw(0..6, 0..self.circles.len() as u32);
 
-            // Draw text (glyphon middleware style)
+            // ---- draw text (PHASE 2) ----
             self.text_renderer
-                .render(&mut self.atlas, &mut self.viewport, &mut renderpass)
+                .render(&mut self.atlas, &mut self.viewport, &mut render_pass)
                 .unwrap();
         }
-        self.atlas.trim();
 
         self.queue.submit([encoder.finish()]);
-        self.window.pre_present_notify();
         surface_texture.present();
+    }
+
+    /// Converts a physical pixel position (from winit) to NDC (-1..1 range)
+    /// Returns [x, y] in NDC space
+    fn physical_to_ndc(&self, position: winit::dpi::PhysicalPosition<f64>) -> [f32; 2] {
+        let width = self.size.width as f32;
+        let height = self.size.height as f32;
+
+        // Avoid division by zero (e.g., minimized window)
+        if width <= 0.0 || height <= 0.0 {
+            return [0.0, 0.0];
+        }
+
+        let x = (position.x as f32 / width) * 2.0 - 1.0;
+        let y = 1.0 - (position.y as f32 / height) * 2.0; // Flip Y: top-left → bottom-left
+
+        [x, y]
+    }
+    fn update_fps_text(&mut self) {
+        let fps_text = format!("FPS: {}", self.current_fps);
+
+        self.fps_buffer.set_text(
+            &mut self.font_system,
+            &fps_text,
+            &glyphon::Attrs::new()
+                .family(glyphon::Family::Monospace)
+                .color(glyphon::Color::rgb(255, 255, 100)),
+            glyphon::Shaping::Basic,
+            None,
+        );
+
+        self.fps_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
+        self.fps_dirty = true;
+    }
+    fn simulate_fixed_step(&mut self) {
+        // red ball movement
+        self.circles[0].position[0] += 0.005;
+        if self.circles[0].position[0] > 1.2 {
+            self.circles[0].position[0] = -1.2;
+        }
+    }
+
+    fn prepare_text(&mut self) {
+        // Update viewport if needed (safe to call when text changes)
+        self.viewport.update(
+            &self.queue,
+            glyphon::Resolution {
+                width: self.size.width,
+                height: self.size.height,
+            },
+        );
+
+        self.text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                [
+                    // Main text block
+                    glyphon::TextArea {
+                        buffer: &self.text_buffer,
+                        left: 10.0,
+                        top: 10.0,
+                        scale: 1.0,
+                        bounds: glyphon::TextBounds {
+                            left: 0,
+                            top: 0,
+                            right: 600,
+                            bottom: 160,
+                        },
+                        default_color: glyphon::Color::rgb(255, 255, 255),
+                        custom_glyphs: &[],
+                    },
+                    // FPS overlay
+                    glyphon::TextArea {
+                        buffer: &self.fps_buffer,
+                        left: self.size.width as f32 - 250.0,
+                        top: self.size.height as f32 - 40.0,
+                        scale: 1.0,
+                        bounds: glyphon::TextBounds::default(),
+                        default_color: glyphon::Color::rgb(255, 255, 100),
+                        custom_glyphs: &[],
+                    },
+                ],
+                &mut self.swash_cache,
+            )
+            .unwrap();
     }
 }
 
@@ -427,54 +559,19 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                app_state.circles[0].position[0] += 0.005;
-                if app_state.circles[0].position[0] > 1.2 {
-                    app_state.circles[0].position[0] = -1.2;
+                if app_state.text_dirty || app_state.fps_dirty {
+                    app_state.prepare_text();
+                    app_state.text_dirty = false;
+                    app_state.fps_dirty = false;
                 }
-
-                // glyphon prep
-                app_state.viewport.update(
-                    &app_state.queue,
-                    glyphon::Resolution {
-                        width: app_state.size.width,
-                        height: app_state.size.height,
-                    },
-                );
-
-                app_state
-                    .text_renderer
-                    .prepare(
-                        &app_state.device,
-                        &app_state.queue,
-                        &mut app_state.font_system,
-                        &mut app_state.atlas,
-                        &app_state.viewport,
-                        [glyphon::TextArea {
-                            buffer: &app_state.text_buffer,
-                            left: 10.0,
-                            top: 10.0,
-                            scale: 1.0,
-                            bounds: glyphon::TextBounds {
-                                left: 0,
-                                top: 0,
-                                right: 600,
-                                bottom: 160,
-                            },
-                            default_color: glyphon::Color::rgb(255, 255, 255),
-                            custom_glyphs: &[],
-                        }],
-                        &mut app_state.swash_cache,
-                    )
-                    .unwrap();
-
+                app_state.fps_frame_count += 1;
                 app_state.render();
-
-                app_state.window.request_redraw();
             }
             WindowEvent::Resized(size) => {
                 // Reconfigures the size of the surface. We do not re-render
                 // here as this event is always followed up by redraw request.
                 app_state.resize(size);
+                app_state.window.request_redraw();
             }
 
             WindowEvent::ModifiersChanged(new_modifiers) => {
@@ -488,8 +585,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                app_state.cursor_position = Some(position);
-                println!("Cursor position: x={}, y={}", position.x, position.y);
+                let ndc = app_state.physical_to_ndc(position);
+                if let Some(circle) = app_state.circles.get_mut(1) {
+                    circle.position = ndc;
+                }
+                app_state.window.request_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(position) = app_state.cursor_position {
@@ -500,6 +600,39 @@ impl ApplicationHandler for App {
                 }
             }
             _ => (),
+        }
+    }
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        let state = self.state.as_mut().unwrap();
+
+        let now = Instant::now();
+        let frame_dt = now - state.last_update;
+        state.last_update = now;
+
+        state.sim_accumulator += frame_dt;
+
+        let mut did_simulate = false;
+
+        // ---- FIXED TIMESTEP ----
+        while state.sim_accumulator >= SIM_DT {
+            state.sim_accumulator -= SIM_DT;
+            state.simulate_fixed_step();
+            did_simulate = true;
+        }
+
+        // ---- FPS TIMER ----
+        if now - state.fps_timer >= FPS_UPDATE_DT {
+            let elapsed = (now - state.fps_timer).as_secs_f32();
+            state.current_fps = (state.fps_frame_count as f32 / elapsed) as u32;
+            state.fps_frame_count = 0;
+            state.fps_timer = now;
+
+            state.update_fps_text();
+        }
+
+        // ---- REDRAW DECISION ----
+        if did_simulate || state.fps_dirty {
+            state.window.request_redraw();
         }
     }
 }
