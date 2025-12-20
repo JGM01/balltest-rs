@@ -4,7 +4,7 @@ use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
+    keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -120,15 +120,28 @@ impl State {
         self.configure_surface();
     }
 
-    fn handle_keys(&self, event_loop: &ActiveEventLoop, key: KeyCode) {
+    fn handle_keys(&self, event_loop: &ActiveEventLoop, key: KeyCode, modifiers: ModifiersState) {
         match key {
             KeyCode::Escape => {
                 println!("ESC key pressed; stopping");
                 event_loop.exit();
             }
+            KeyCode::KeyC if modifiers.control_key() => {
+                println!("CTRL+C pressed");
+                // Copy logic goes here :D
+            }
+            KeyCode::KeyV if modifiers.control_key() => {
+                println!("CTRL+V pressed");
+                // Paste logic goes here :D
+            }
+            KeyCode::KeyA if modifiers.control_key() => {
+                println!("CTRL+A pressed");
+                // Copy-All logic goes here :D
+            }
             _ => (),
         }
     }
+
     fn render(&mut self) {
         // Create texture view
         let surface_texture = self
@@ -146,6 +159,7 @@ impl State {
 
         // Renders a GREEN screen
         let mut encoder = self.device.create_command_encoder(&Default::default());
+
         // Create the renderpass which will clear the screen.
         let renderpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
@@ -163,7 +177,7 @@ impl State {
             occlusion_query_set: None,
         });
 
-        // If you wanted to call any drawing commands, they would go here.
+        // drawing commands go here.
 
         // End the renderpass.
         drop(renderpass);
@@ -178,6 +192,7 @@ impl State {
 #[derive(Default)]
 struct App {
     state: Option<State>,
+    modifiers: ModifiersState,
 }
 
 impl ApplicationHandler for App {
@@ -212,10 +227,13 @@ impl ApplicationHandler for App {
                 // here as this event is always followed up by redraw request.
                 state.resize(size);
             }
+            WindowEvent::ModifiersChanged(new_modifiers) => {
+                self.modifiers = new_modifiers.state();
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state.is_pressed() {
                     if let PhysicalKey::Code(keycode) = event.physical_key {
-                        state.handle_keys(event_loop, keycode);
+                        state.handle_keys(event_loop, keycode, self.modifiers);
                     }
                 }
             }
