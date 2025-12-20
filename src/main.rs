@@ -610,6 +610,7 @@ impl ApplicationHandler for App {
                         button, state, position.x, position.y
                     );
                 }
+                app_state.window.request_redraw();
             }
             _ => (),
         }
