@@ -69,6 +69,18 @@ struct CircleInstance {
     color: [f32; 3],    // RGB format
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct NDC1([f32; 2]);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct NDC2([f32; 2]);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct NDC3([f32; 2]);
+
 // To be copied numerous times :D
 // The quad is 2x2 and centered at NDC origin.
 // Vertex shader will:
