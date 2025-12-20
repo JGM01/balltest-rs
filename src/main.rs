@@ -12,8 +12,116 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const SIM_DT: Duration = Duration::from_millis(8); // 125 Hz
-const FPS_UPDATE_DT: Duration = Duration::from_secs(1);
+struct TimeSystem {
+    // Core
+    sim_time: Duration,        // Total simulated time
+    last_update: Instant,      // Last tick time (delta calculation)
+    sim_accumulator: Duration, // Accumulator for fixed-step simulation
+    fps_timer: Instant,        // Timer for FPS interval
+    fps_frame_count: u32,      // Frames since last FPS update
+    current_fps: u32,          // Last calculated FPS
+
+    // Constants
+    sim_dt: Duration, // Simulation time steps
+    fps_dt: Duration, // FPS calculation time steps
+
+    // Flags/States
+    paused: bool,       // Paused flag
+    scale: f32,         // Time dialation
+    is_fps_dirty: bool, // FPS needs update flag
+}
+
+impl TimeSystem {
+    pub fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            sim_time: Duration::ZERO,
+            last_update: now,
+            sim_accumulator: Duration::ZERO,
+            fps_timer: now,
+            fps_frame_count: 0,
+            current_fps: 0,
+            sim_dt: Duration::from_millis(8), // 125 Hz, as in original
+            fps_dt: Duration::from_secs(1),
+            paused: false,
+            scale: 1.0,
+            is_fps_dirty: false,
+        }
+    }
+
+    /// Advances time and returns:
+    /// - number of fixed simulation steps to run
+    /// - optional FPS update (once per fps_dt)
+    /// - whether a redraw is justified
+    /// - interpolation alpha for rendering (0.0–1.0)
+    pub fn tick(&mut self, now: Instant) -> (u32, Option<u32>, bool, f32) {
+        // IRL-time delta
+        let mut frame_dt = now - self.last_update;
+        self.last_update = now;
+
+        // If paused, discard accumulated time and do nothing
+        if self.paused {
+            self.sim_accumulator = Duration::ZERO;
+            return (0, None, false, 0.0);
+        }
+
+        // Prevent really high deltas (debugger stops, OS hitches, etc.)
+        let max_frame_dt = self.sim_dt * 5;
+        frame_dt = frame_dt.min(max_frame_dt);
+
+        // Accumulate scaled simulation time
+        self.sim_accumulator += frame_dt.mul_f32(self.scale);
+
+        // Fixed-step simulation
+        let mut sim_steps = 0;
+        while self.sim_accumulator >= self.sim_dt {
+            self.sim_accumulator -= self.sim_dt;
+            self.sim_time += self.sim_dt;
+            sim_steps += 1;
+        }
+
+        // FPS measurement
+        self.fps_frame_count += 1;
+        let mut fps_update = None;
+
+        if now - self.fps_timer >= self.fps_dt {
+            let elapsed = (now - self.fps_timer).as_secs_f32();
+            let fps = (self.fps_frame_count as f32 / elapsed).round() as u32;
+
+            self.current_fps = fps;
+            self.fps_frame_count = 0;
+            self.fps_timer = now;
+
+            fps_update = Some(fps);
+        }
+
+        // Interpolation factor for rendering
+        let alpha =
+            (self.sim_accumulator.as_secs_f32() / self.sim_dt.as_secs_f32()).clamp(0.0, 1.0);
+
+        // Redraw if simulation progressed or FPS text changed
+        let needs_redraw = sim_steps > 0 || fps_update.is_some();
+
+        (sim_steps, fps_update, needs_redraw, alpha)
+    }
+
+    pub fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+
+        if !self.paused {
+            let now = Instant::now();
+            self.last_update = now;
+            self.fps_timer = now;
+            self.sim_accumulator = Duration::ZERO;
+        }
+    }
+    pub fn reset_fps_dirty(&mut self) {
+        self.is_fps_dirty = false;
+    }
+    pub fn set_fps_dirty(&mut self) {
+        self.is_fps_dirty = true;
+    }
+}
 
 // Just a structure to encompass the state of the program.
 struct State {
@@ -42,18 +150,12 @@ struct State {
     text_renderer: glyphon::TextRenderer,
     text_buffer: glyphon::Buffer,
 
-    fps_timer: Instant,
-    fps_frame_count: u32,
-    current_fps: u32,
-
-    last_update: Instant,
-    sim_accumulator: Duration,
+    timing: TimeSystem,
 
     fps_buffer: glyphon::Buffer,
 
     // text dirtiness
     text_dirty: bool,
-    fps_dirty: bool,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -291,10 +393,6 @@ impl State {
             ,None,);
         text_buffer.shape_until_scroll(&mut font_system, false);
 
-        let fps_timer = Instant::now();
-        let fps_frame_count = 0;
-        let current_fps = 0;
-
         // FPS text buffer
         let mut fps_buffer =
             glyphon::Buffer::new(&mut font_system, glyphon::Metrics::new(24.0, 32.0));
@@ -312,8 +410,7 @@ impl State {
         );
         fps_buffer.shape_until_scroll(&mut font_system, false);
 
-        let last_update = Instant::now();
-        let sim_accumulator = Duration::ZERO;
+        let timing = TimeSystem::new();
 
         let state = State {
             window,
@@ -333,14 +430,9 @@ impl State {
             atlas,
             text_renderer,
             text_buffer,
-            fps_timer,
-            fps_frame_count,
-            current_fps,
             fps_buffer,
-            last_update,
-            sim_accumulator,
             text_dirty: true,
-            fps_dirty: true,
+            timing,
         };
 
         // Configure surface for the first time
@@ -465,8 +557,8 @@ impl State {
 
         [x, y]
     }
-    fn update_fps_text(&mut self) {
-        let fps_text = format!("FPS: {}", self.current_fps);
+    fn update_fps_text(&mut self, fps: u32) {
+        let fps_text = format!("FPS: {}", fps);
 
         self.fps_buffer.set_text(
             &mut self.font_system,
@@ -481,7 +573,7 @@ impl State {
         self.fps_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        self.fps_dirty = true;
+        self.timing.set_fps_dirty();
     }
     fn simulate_fixed_step(&mut self) {
         // red ball movement
@@ -571,12 +663,11 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                if app_state.text_dirty || app_state.fps_dirty {
+                if app_state.text_dirty || app_state.timing.is_fps_dirty {
                     app_state.prepare_text();
                     app_state.text_dirty = false;
-                    app_state.fps_dirty = false;
+                    app_state.timing.reset_fps_dirty(); // Clear after prepare
                 }
-                app_state.fps_frame_count += 1;
                 app_state.render();
             }
             WindowEvent::Resized(size) => {
@@ -618,33 +709,17 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         let state = self.state.as_mut().unwrap();
 
-        let now = Instant::now();
-        let frame_dt = now - state.last_update;
-        state.last_update = now;
+        let (steps, fps_update, redraw, ..) = state.timing.tick(Instant::now());
 
-        state.sim_accumulator += frame_dt;
-
-        let mut did_simulate = false;
-
-        // ---- FIXED TIMESTEP ----
-        while state.sim_accumulator >= SIM_DT {
-            state.sim_accumulator -= SIM_DT;
+        for _ in 0..steps {
             state.simulate_fixed_step();
-            did_simulate = true;
         }
 
-        // ---- FPS TIMER ----
-        if now - state.fps_timer >= FPS_UPDATE_DT {
-            let elapsed = (now - state.fps_timer).as_secs_f32();
-            state.current_fps = (state.fps_frame_count as f32 / elapsed) as u32;
-            state.fps_frame_count = 0;
-            state.fps_timer = now;
-
-            state.update_fps_text();
+        if let Some(fps) = fps_update {
+            state.update_fps_text(fps);
         }
 
-        // ---- REDRAW DECISION ----
-        if did_simulate || state.fps_dirty {
+        if redraw {
             state.window.request_redraw();
         }
     }
