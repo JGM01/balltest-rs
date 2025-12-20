@@ -12,6 +12,48 @@ use winit::{
     window::{Window, WindowId},
 };
 
+struct FrameStats {
+    // frame timing
+    last_present: Instant,
+    frame_time_accum: Duration,
+    frame_count: u32,
+    avg_frame_time_ms: f32,
+    present_fps: u32,
+
+    // simulation
+    sim_steps_accum: u32,
+    sim_tps: u32,
+
+    // render
+    render_count: u32,
+    render_fps: u32,
+
+    // interval
+    last_report: Instant,
+    report_dt: Duration,
+}
+
+impl FrameStats {
+    fn new(now: Instant) -> Self {
+        Self {
+            last_present: now,
+            frame_time_accum: Duration::ZERO,
+            frame_count: 0,
+            avg_frame_time_ms: 0.0,
+            present_fps: 0,
+
+            sim_steps_accum: 0,
+            sim_tps: 0,
+
+            render_count: 0,
+            render_fps: 0,
+
+            last_report: now,
+            report_dt: Duration::from_secs(1),
+        }
+    }
+}
+
 struct TimeSystem {
     // Core
     sim_time: Duration,        // Total simulated time
@@ -121,6 +163,9 @@ impl TimeSystem {
     pub fn set_fps_dirty(&mut self) {
         self.is_fps_dirty = true;
     }
+    pub fn next_wakeup(&self) -> Instant {
+        self.last_update + self.sim_dt
+    }
 }
 
 // Just a structure to encompass the state of the program.
@@ -151,6 +196,7 @@ struct State {
     text_buffer: glyphon::Buffer,
 
     timing: TimeSystem,
+    frame_stats: FrameStats,
 
     fps_buffer: glyphon::Buffer,
 
@@ -433,6 +479,7 @@ impl State {
             fps_buffer,
             text_dirty: true,
             timing,
+            frame_stats: FrameStats::new(Instant::now()),
         };
 
         // Configure surface for the first time
@@ -495,6 +542,7 @@ impl State {
     }
 
     fn render(&mut self) {
+        self.frame_stats.render_count += 1;
         // Upload per-instance data
         self.queue.write_buffer(
             &self.instance_buffer,
@@ -525,13 +573,13 @@ impl State {
                 ..Default::default()
             });
 
-            // ---- draw circles ----
+            // draw circles
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.draw(0..6, 0..self.circles.len() as u32);
 
-            // ---- draw text (PHASE 2) ----
+            // draw text
             self.text_renderer
                 .render(&mut self.atlas, &mut self.viewport, &mut render_pass)
                 .unwrap();
@@ -539,6 +587,45 @@ impl State {
 
         self.queue.submit([encoder.finish()]);
         surface_texture.present();
+
+        let now = Instant::now();
+        let dt = now - self.frame_stats.last_present;
+        self.frame_stats.last_present = now;
+
+        self.frame_stats.frame_time_accum += dt;
+        self.frame_stats.frame_count += 1;
+
+        let elapsed = now - self.frame_stats.last_report;
+        if elapsed >= self.frame_stats.report_dt {
+            let secs = elapsed.as_secs_f32();
+
+            // Frame time / FPS
+            if self.frame_stats.frame_count > 0 {
+                let avg_dt = self.frame_stats.frame_time_accum.as_secs_f32()
+                    / self.frame_stats.frame_count as f32;
+
+                self.frame_stats.avg_frame_time_ms = avg_dt * 1000.0;
+                self.frame_stats.present_fps = (1.0 / avg_dt).round() as u32;
+            }
+
+            // Simulation TPS
+            self.frame_stats.sim_tps =
+                (self.frame_stats.sim_steps_accum as f32 / secs).round() as u32;
+
+            // Render FPS
+            self.frame_stats.render_fps =
+                (self.frame_stats.render_count as f32 / secs).round() as u32;
+
+            // Reset accumulators
+            self.frame_stats.frame_time_accum = Duration::ZERO;
+            self.frame_stats.frame_count = 0;
+            self.frame_stats.sim_steps_accum = 0;
+            self.frame_stats.render_count = 0;
+            self.frame_stats.last_report = now;
+
+            // Mark overlay dirty
+            self.timing.set_fps_dirty();
+        }
     }
 
     /// Converts a physical pixel position (from winit) to NDC (-1..1 range)
@@ -557,15 +644,22 @@ impl State {
 
         [x, y]
     }
-    fn update_fps_text(&mut self, fps: u32) {
-        let fps_text = format!("FPS: {}", fps);
+
+    fn update_stats_text(&mut self) {
+        let s = format!(
+            "Frame:    {:5.2} ms ({:3} fps)\nSim:     {:3} ticks/s\nRender:  {:3} fps",
+            self.frame_stats.avg_frame_time_ms,
+            self.frame_stats.present_fps,
+            self.frame_stats.sim_tps,
+            self.frame_stats.render_fps,
+        );
 
         self.fps_buffer.set_text(
             &mut self.font_system,
-            &fps_text,
+            &s,
             &glyphon::Attrs::new()
                 .family(glyphon::Family::Monospace)
-                .color(glyphon::Color::rgb(255, 255, 100)),
+                .color(glyphon::Color::rgb(255, 255, 160)),
             glyphon::Shaping::Basic,
             None,
         );
@@ -573,7 +667,7 @@ impl State {
         self.fps_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        self.timing.set_fps_dirty();
+        self.text_dirty = true;
     }
     fn simulate_fixed_step(&mut self) {
         // red ball movement
@@ -584,7 +678,7 @@ impl State {
     }
 
     fn prepare_text(&mut self) {
-        // Update viewport if needed (safe to call when text changes)
+        // Update viewport (safe even if unchanged)
         self.viewport.update(
             &self.queue,
             glyphon::Resolution {
@@ -593,6 +687,20 @@ impl State {
             },
         );
 
+        let (w, h) = self.fps_buffer.size();
+        let text_width = w.unwrap_or(0.0);
+        let text_height = h.unwrap_or(0.0);
+
+        let margin = 12.0;
+
+        let left = (self.size.width as f32 - text_width - margin)
+            .max(margin)
+            .round();
+
+        let top = (self.size.height as f32 - text_height - margin)
+            .max(margin)
+            .round();
+
         self.text_renderer
             .prepare(
                 &self.device,
@@ -600,33 +708,15 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [
-                    // Main text block
-                    glyphon::TextArea {
-                        buffer: &self.text_buffer,
-                        left: 10.0,
-                        top: 10.0,
-                        scale: 1.0,
-                        bounds: glyphon::TextBounds {
-                            left: 0,
-                            top: 0,
-                            right: 600,
-                            bottom: 160,
-                        },
-                        default_color: glyphon::Color::rgb(255, 255, 255),
-                        custom_glyphs: &[],
-                    },
-                    // FPS overlay
-                    glyphon::TextArea {
-                        buffer: &self.fps_buffer,
-                        left: self.size.width as f32 - 250.0,
-                        top: self.size.height as f32 - 40.0,
-                        scale: 1.0,
-                        bounds: glyphon::TextBounds::default(),
-                        default_color: glyphon::Color::rgb(255, 255, 100),
-                        custom_glyphs: &[],
-                    },
-                ],
+                [glyphon::TextArea {
+                    buffer: &self.fps_buffer,
+                    left,
+                    top,
+                    scale: 1.0,
+                    bounds: glyphon::TextBounds::default(),
+                    default_color: glyphon::Color::rgb(255, 255, 160),
+                    custom_glyphs: &[],
+                }],
                 &mut self.swash_cache,
             )
             .unwrap();
@@ -671,7 +761,7 @@ impl ApplicationHandler for App {
                 app_state.render();
             }
             WindowEvent::Resized(size) => {
-                // Reconfigures the size of the surface. We do not re-render
+                // Reconfigures the size of the surface. No re-render
                 // here as this event is always followed up by redraw request.
                 app_state.resize(size);
                 app_state.window.request_redraw();
@@ -706,22 +796,26 @@ impl ApplicationHandler for App {
             _ => (),
         }
     }
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        let state = self.state.as_mut().unwrap();
 
-        let (steps, fps_update, redraw, ..) = state.timing.tick(Instant::now());
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let state = self.state.as_mut().unwrap();
+        let now = Instant::now();
+
+        let (steps, .., redraw, _) = state.timing.tick(now);
 
         for _ in 0..steps {
             state.simulate_fixed_step();
         }
+        state.frame_stats.sim_steps_accum += steps;
 
-        if let Some(fps) = fps_update {
-            state.update_fps_text(fps);
-        }
+        state.update_stats_text();
 
         if redraw {
             state.window.request_redraw();
         }
+
+        let next = state.timing.next_wakeup();
+        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
     }
 }
 
@@ -729,12 +823,6 @@ fn main() {
     env_logger::init();
 
     let event_loop = EventLoop::new().unwrap();
-
-    // When the current loop iteration finishes, immediately begin a new
-    // iteration regardless of whether or not new events are available to
-    // process. Preferred for applications that want to render as fast as
-    // possible, like games.
-    event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = App::default();
     event_loop.run_app(&mut app).unwrap();
