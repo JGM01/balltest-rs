@@ -1,0 +1,10 @@
+[package]
+name = "balltest-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+env_logger = "0.11.8"
+pollster = "0.4.0"
+wgpu = "27.0.1"
+winit = {version = "0.30.12", features = ["android-native-activity"] } 
