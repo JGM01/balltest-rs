@@ -1,4 +1,7 @@
-use winit::keyboard::{KeyCode, ModifiersState};
+use winit::{
+    dpi::PhysicalPosition,
+    keyboard::{KeyCode, ModifiersState},
+};
 
 /// InputSystem translates raw input events into application commands/state
 pub struct InputSystem {
@@ -65,5 +68,4 @@ impl InputSystem {
 pub enum InputCommand {
     Exit,
     TogglePause,
-    // Future: Click(x, y), Drag(x, y), etc.
 }

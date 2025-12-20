@@ -48,12 +48,15 @@ impl App {
             Entity::new_circle([-0.5, -0.5], 0.15, [0.0, 0.0, 1.0]).with_physics(Physics::new()),
         );
 
-        world.add_entity(Entity::new_text(
-            [-0.5, -0.5],
-            String::from("THIS IS SOME TEXT!!! I HOPE IT RENDERS!!!"),
-            24.0,
-            [1.0, 1.0, 1.0],
-        ));
+        world.add_entity(
+            Entity::new_text(
+                [-0.5, -0.5],
+                String::from("THIS IS SOME TEXT!!! I HOPE IT RENDERS!!!"),
+                24.0,
+                [1.0, 1.0, 1.0],
+            )
+            .with_clickable(Clickable::new()),
+        );
         world.add_entity(Entity::new_text(
             [-0.5, -0.5],
             String::from("THIS IS SOME TEXT!!!\nI HOPE IT RENDERS!!!\nIT SHOULD BE LARGER"),
@@ -144,15 +147,6 @@ impl ApplicationHandler for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 self.input.update_cursor(position);
-                // Example: move second circle with cursor (temporary test behavior)
-                let ndc = self.input.physical_to_ndc(
-                    position,
-                    renderer.window.inner_size().width,
-                    renderer.window.inner_size().height,
-                );
-                if let Some(entity) = self.world.entities_mut().get_mut(1) {
-                    entity.transform_mut().position = ndc;
-                }
                 renderer.window.request_redraw();
             }
 
@@ -163,6 +157,32 @@ impl ApplicationHandler for App {
                         button, state, position.x, position.y
                     );
                 }
+            }
+
+            WindowEvent::MouseWheel {
+                device_id,
+                delta,
+                phase,
+            } => {
+                println!("Mouse {:?} moved {:?} | {:?}", device_id, delta, phase);
+            }
+
+            WindowEvent::PinchGesture {
+                device_id,
+                delta,
+                phase,
+            } => {
+                println!("Mouse {:?} pinched {:?} | {:?}", device_id, delta, phase);
+            }
+            WindowEvent::TouchpadPressure {
+                device_id,
+                pressure,
+                stage,
+            } => {
+                println!(
+                    "Mouse {:?} pressure {:?} | {:?}",
+                    device_id, pressure, stage
+                );
             }
 
             _ => (),
