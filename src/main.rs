@@ -4,6 +4,7 @@ use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -119,6 +120,15 @@ impl State {
         self.configure_surface();
     }
 
+    fn handle_keys(&self, event_loop: &ActiveEventLoop, key: KeyCode) {
+        match key {
+            KeyCode::Escape => {
+                println!("ESC key pressed; stopping");
+                event_loop.exit();
+            }
+            _ => (),
+        }
+    }
     fn render(&mut self) {
         // Create texture view
         let surface_texture = self
@@ -201,6 +211,13 @@ impl ApplicationHandler for App {
                 // Reconfigures the size of the surface. We do not re-render
                 // here as this event is always followed up by redraw request.
                 state.resize(size);
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state.is_pressed() {
+                    if let PhysicalKey::Code(keycode) = event.physical_key {
+                        state.handle_keys(event_loop, keycode);
+                    }
+                }
             }
             _ => (),
         }
