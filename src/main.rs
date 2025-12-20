@@ -28,6 +28,13 @@ struct State {
     // circle count
     circles: Vec<CircleInstance>,
     cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
+
+    font_system: glyphon::FontSystem,
+    swash_cache: glyphon::SwashCache,
+    viewport: glyphon::Viewport,
+    atlas: glyphon::TextAtlas,
+    text_renderer: glyphon::TextRenderer,
+    text_buffer: glyphon::Buffer,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -109,6 +116,7 @@ impl State {
             .unwrap();
 
         let size = window.inner_size();
+        let scale_factor = window.scale_factor();
 
         // Explicitly represents a platform-specific drawable area (usually a window or canvas).
         // - NOT IN THE SPEC! This is how native APIs hook into whatever drawable surface it can
@@ -184,7 +192,7 @@ impl State {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -223,6 +231,35 @@ impl State {
         ];
 
         let cursor_position: Option<winit::dpi::PhysicalPosition<f64>> = None;
+
+        // Set up text renderer
+        let mut font_system = glyphon::FontSystem::new();
+        let swash_cache = glyphon::SwashCache::new();
+        let cache = glyphon::Cache::new(&device);
+        let viewport = glyphon::Viewport::new(&device, &cache);
+        let mut atlas =
+            glyphon::TextAtlas::new(&device, &queue, &cache, wgpu::TextureFormat::Bgra8UnormSrgb);
+        let text_renderer = glyphon::TextRenderer::new(
+            &mut atlas,
+            &device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        let mut text_buffer =
+            glyphon::Buffer::new(&mut font_system, glyphon::Metrics::new(30.0, 42.0));
+
+        let physical_width = (size.width as f64 * scale_factor) as f32;
+        let physical_height = (size.height as f64 * scale_factor) as f32;
+
+        text_buffer.set_size(
+            &mut font_system,
+            Some(physical_width),
+            Some(physical_height),
+        );
+        text_buffer.set_text(&mut font_system, "Hello world! 👋\nThis is rendered with 🦅 glyphon 🦁\nThe text below should be partially clipped.\na b c d e f g h i j k l m n o p q r s t u v w x y z", &glyphon::Attrs::new().family(glyphon::Family::SansSerif), glyphon::Shaping::Advanced
+            ,None,);
+        text_buffer.shape_until_scroll(&mut font_system, false);
+
         let state = State {
             window,
             device,
@@ -235,16 +272,18 @@ impl State {
             instance_buffer,
             circles,
             cursor_position,
+            font_system,
+            swash_cache,
+            viewport,
+            atlas,
+            text_renderer,
+            text_buffer,
         };
 
         // Configure surface for the first time
         state.configure_surface();
 
         state
-    }
-
-    fn get_window(&self) -> &Window {
-        &self.window
     }
 
     fn configure_surface(&self) {
@@ -268,9 +307,14 @@ impl State {
 
     fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         self.size = new_size;
-
-        // reconfigure the surface
         self.configure_surface();
+
+        // Allow text to reflow on resize
+        self.text_buffer.set_size(
+            &mut self.font_system,
+            Some(new_size.width as f32),
+            Some(new_size.height as f32),
+        );
     }
 
     fn handle_keys(&self, event_loop: &ActiveEventLoop, key: KeyCode, modifiers: ModifiersState) {
@@ -331,6 +375,7 @@ impl State {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             // Draw circles
@@ -338,7 +383,13 @@ impl State {
             renderpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             renderpass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             renderpass.draw(0..6, 0..self.circles.len() as u32);
+
+            // Draw text (glyphon middleware style)
+            self.text_renderer
+                .render(&mut self.atlas, &mut self.viewport, &mut renderpass)
+                .unwrap();
         }
+        self.atlas.trim();
 
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
@@ -374,16 +425,58 @@ impl ApplicationHandler for App {
                 println!("The close button was pressed; stopping");
                 event_loop.exit();
             }
+
             WindowEvent::RedrawRequested => {
+                app_state.circles[0].position[0] += 0.005;
+                if app_state.circles[0].position[0] > 1.2 {
+                    app_state.circles[0].position[0] = -1.2;
+                }
+
+                // glyphon prep
+                app_state.viewport.update(
+                    &app_state.queue,
+                    glyphon::Resolution {
+                        width: app_state.size.width,
+                        height: app_state.size.height,
+                    },
+                );
+
+                app_state
+                    .text_renderer
+                    .prepare(
+                        &app_state.device,
+                        &app_state.queue,
+                        &mut app_state.font_system,
+                        &mut app_state.atlas,
+                        &app_state.viewport,
+                        [glyphon::TextArea {
+                            buffer: &app_state.text_buffer,
+                            left: 10.0,
+                            top: 10.0,
+                            scale: 1.0,
+                            bounds: glyphon::TextBounds {
+                                left: 0,
+                                top: 0,
+                                right: 600,
+                                bottom: 160,
+                            },
+                            default_color: glyphon::Color::rgb(255, 255, 255),
+                            custom_glyphs: &[],
+                        }],
+                        &mut app_state.swash_cache,
+                    )
+                    .unwrap();
+
                 app_state.render();
-                // Emits a new redraw requested event.
-                app_state.get_window().request_redraw();
+
+                app_state.window.request_redraw();
             }
             WindowEvent::Resized(size) => {
                 // Reconfigures the size of the surface. We do not re-render
                 // here as this event is always followed up by redraw request.
                 app_state.resize(size);
             }
+
             WindowEvent::ModifiersChanged(new_modifiers) => {
                 self.modifiers = new_modifiers.state();
             }
