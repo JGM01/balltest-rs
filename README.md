@@ -1,4 +1,4 @@
-balltest-rs: The beginnings of the greatest programming interface ever made.
+balltest-rs: The beginnings of the greatest programming interface ever.
 ------
 
 <img width="949" height="741" alt="image" src="https://github.com/user-attachments/assets/760055c6-92a5-42ad-93c4-f4fad98044c2" />
