@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -16,7 +17,60 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
+    render_pipeline: wgpu::RenderPipeline,
+
+    // ECS stuff will go here (positions, colors, radii)
+    instance_buffer: wgpu::Buffer,
+
+    // Verticies for the circles (6 each) (doing quads) (2 triangles)
+    vertex_buffer: wgpu::Buffer,
+
+    // circle count
+    circles: Vec<CircleInstance>,
 }
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 2], // x, y of vertex
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct CircleInstance {
+    position: [f32; 2], // Circle Center; NDC (Normalized Device Coordinates (-1 -> +1))
+    radius: f32,        // Circle Radius; NDC
+    color: [f32; 3],    // RGB format
+}
+
+// To be copied numerous times :D
+// The quad is 2x2 and centered at NDC origin.
+// Vertex shader will:
+// - scale it by `radius`
+// - translate by `pos`
+// Fragment shader will:
+// - Color each inner pixel using `color`
+const QUAD_VERTICES: &[Vertex] = &[
+    // Triangle 1
+    Vertex {
+        position: [-1.0, -1.0],
+    }, // bottom-left
+    Vertex {
+        position: [1.0, -1.0],
+    }, // bottom-right
+    Vertex {
+        position: [1.0, 1.0],
+    }, // top-right
+    // Triangle 2
+    Vertex {
+        position: [-1.0, -1.0],
+    }, // bottom-left
+    Vertex {
+        position: [1.0, 1.0],
+    }, // top-right
+    Vertex {
+        position: [-1.0, 1.0],
+    }, // top-left
+];
 
 impl State {
     async fn new(window: Arc<Window>) -> State {
@@ -75,6 +129,98 @@ impl State {
         let cap = surface.get_capabilities(&adapter);
         let surface_format = cap.formats[0];
 
+        // Create shader module
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Circle Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+
+        // Create render pipeline
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Circle Pipeline"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[
+                    // Vertex buffer layout
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                    },
+                    // Instance buffer layout
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<CircleInstance>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![
+                            1 => Float32x2,  // position
+                            2 => Float32,    // radius
+                            3 => Float32x3,  // color
+                        ],
+                    },
+                ],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // Create vertex buffer (static)
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(QUAD_VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        // Create instance buffer (dynamic, preallocated for 50 circles)
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Instance Buffer"),
+            size: (std::mem::size_of::<CircleInstance>() * 50) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Initialize with some test circles
+        let circles = vec![
+            CircleInstance {
+                position: [0.0, 0.0],
+                radius: 0.3,
+                color: [1.0, 0.0, 0.0], // Red
+            },
+            CircleInstance {
+                position: [0.5, 0.5],
+                radius: 0.2,
+                color: [0.0, 1.0, 0.0], // Green
+            },
+            CircleInstance {
+                position: [-0.5, -0.5],
+                radius: 0.15,
+                color: [0.0, 0.0, 1.0], // Blue
+            },
+        ];
+
         let state = State {
             window,
             device,
@@ -82,6 +228,10 @@ impl State {
             size,
             surface,
             surface_format,
+            render_pipeline,
+            vertex_buffer,
+            instance_buffer,
+            circles,
         };
 
         // Configure surface for the first time
@@ -143,7 +293,13 @@ impl State {
     }
 
     fn render(&mut self) {
-        // Create texture view
+        // Update instance buffer with current circle data
+        self.queue.write_buffer(
+            &self.instance_buffer,
+            0,
+            bytemuck::cast_slice(&self.circles),
+        );
+
         let surface_texture = self
             .surface
             .get_current_texture()
@@ -151,38 +307,36 @@ impl State {
         let texture_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor {
-                // Without add_srgb_suffix() the image we will be working with
-                // might not be "gamma correct".
                 format: Some(self.surface_format.add_srgb_suffix()),
                 ..Default::default()
             });
 
-        // Renders a GREEN screen
         let mut encoder = self.device.create_command_encoder(&Default::default());
 
-        // Create the renderpass which will clear the screen.
-        let renderpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: None,
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &texture_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
+        {
+            let mut renderpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &texture_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
 
-        // drawing commands go here.
+            // Draw circles
+            renderpass.set_pipeline(&self.render_pipeline);
+            renderpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            renderpass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            renderpass.draw(0..6, 0..self.circles.len() as u32);
+        }
 
-        // End the renderpass.
-        drop(renderpass);
-
-        // Submit the command in the queue to execute
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         surface_texture.present();
