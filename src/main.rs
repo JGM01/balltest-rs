@@ -27,6 +27,7 @@ struct State {
 
     // circle count
     circles: Vec<CircleInstance>,
+    cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -221,6 +222,7 @@ impl State {
             },
         ];
 
+        let cursor_position: Option<winit::dpi::PhysicalPosition<f64>> = None;
         let state = State {
             window,
             device,
@@ -232,6 +234,7 @@ impl State {
             vertex_buffer,
             instance_buffer,
             circles,
+            cursor_position,
         };
 
         // Configure surface for the first time
@@ -365,21 +368,21 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let state = self.state.as_mut().unwrap();
+        let app_state = self.state.as_mut().unwrap();
         match event {
             WindowEvent::CloseRequested => {
                 println!("The close button was pressed; stopping");
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                state.render();
+                app_state.render();
                 // Emits a new redraw requested event.
-                state.get_window().request_redraw();
+                app_state.get_window().request_redraw();
             }
             WindowEvent::Resized(size) => {
                 // Reconfigures the size of the surface. We do not re-render
                 // here as this event is always followed up by redraw request.
-                state.resize(size);
+                app_state.resize(size);
             }
             WindowEvent::ModifiersChanged(new_modifiers) => {
                 self.modifiers = new_modifiers.state();
@@ -387,8 +390,20 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state.is_pressed() {
                     if let PhysicalKey::Code(keycode) = event.physical_key {
-                        state.handle_keys(event_loop, keycode, self.modifiers);
+                        app_state.handle_keys(event_loop, keycode, self.modifiers);
                     }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                app_state.cursor_position = Some(position);
+                println!("Cursor position: x={}, y={}", position.x, position.y);
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(position) = app_state.cursor_position {
+                    println!(
+                        "Mouse {:?} {:?} at x={}, y={}",
+                        button, state, position.x, position.y
+                    );
                 }
             }
             _ => (),
