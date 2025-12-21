@@ -33,6 +33,7 @@ impl Entity {
             clickable: None,
         }
     }
+
     pub fn new_rectangle(position: [f32; 2], length: f32, height: f32, color: [f32; 3]) -> Self {
         Entity::Rectangle {
             transform: Transform::new(position),
@@ -59,13 +60,14 @@ impl Entity {
         }
     }
 
-    // Builder-style methods for adding components
+    // Builder-style methods for adding components (now works for ALL entity types)
     pub fn with_physics(mut self, physics: Physics) -> Self {
-        if let Entity::Circle {
-            physics: ref mut p, ..
-        } = self
-        {
-            *p = Some(physics);
+        match &mut self {
+            Entity::Circle { physics: p, .. }
+            | Entity::Text { physics: p, .. }
+            | Entity::Rectangle { physics: p, .. } => {
+                *p = Some(physics);
+            }
         }
         self
     }
@@ -113,6 +115,7 @@ impl Entity {
             | Entity::Rectangle { physics, .. } => physics.as_mut(),
         }
     }
+
     pub fn physics_and_transform_mut(&mut self) -> Option<(&mut Physics, &mut Transform)> {
         match self {
             Entity::Circle {
@@ -163,6 +166,30 @@ impl Entity {
             Entity::Circle { clickable, .. }
             | Entity::Text { clickable, .. }
             | Entity::Rectangle { clickable, .. } => clickable.as_mut(),
+        }
+    }
+
+    /// Check if a point (in NDC coordinates) is inside this entity
+    pub fn contains_point(&self, point: [f32; 2]) -> bool {
+        let transform = self.transform();
+        let dx = point[0] - transform.position[0];
+        let dy = point[1] - transform.position[1];
+
+        match self.shape() {
+            Shape::Circle { radius, .. } => {
+                let dist_sq = dx * dx + dy * dy;
+                dist_sq <= radius * radius
+            }
+            Shape::Rectangle { length, height, .. } => {
+                let half_w = length / 2.0;
+                let half_h = height / 2.0;
+                dx.abs() <= half_w && dy.abs() <= half_h
+            }
+            Shape::Text { .. } => {
+                // radius-based approximation bc i dont wanna do bounding box right now
+                let dist_sq = dx * dx + dy * dy;
+                dist_sq <= 0.1 * 0.1 // Approximate clickable radius
+            }
         }
     }
 }

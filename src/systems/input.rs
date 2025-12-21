@@ -1,12 +1,15 @@
 use winit::{
     dpi::PhysicalPosition,
+    event::MouseButton,
     keyboard::{KeyCode, ModifiersState},
 };
 
 /// InputSystem translates raw input events into application commands/state
 pub struct InputSystem {
     pub modifiers: ModifiersState,
-    pub cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
+    pub cursor_position: Option<PhysicalPosition<f64>>,
+    pub cursor_ndc: Option<[f32; 2]>,
+    pub window_size: (u32, u32),
 }
 
 impl InputSystem {
@@ -14,6 +17,8 @@ impl InputSystem {
         Self {
             modifiers: ModifiersState::empty(),
             cursor_position: None,
+            cursor_ndc: None,
+            window_size: (800, 600),
         }
     }
 
@@ -21,8 +26,19 @@ impl InputSystem {
         self.modifiers = modifiers;
     }
 
-    pub fn update_cursor(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
+    pub fn update_window_size(&mut self, width: u32, height: u32) {
+        self.window_size = (width, height);
+
+        // Recalculate NDC if we have a cursor position
+        if let Some(pos) = self.cursor_position {
+            self.cursor_ndc = Some(self.physical_to_ndc(pos, width, height));
+        }
+    }
+
+    pub fn update_cursor(&mut self, position: PhysicalPosition<f64>) {
         self.cursor_position = Some(position);
+        self.cursor_ndc =
+            Some(self.physical_to_ndc(position, self.window_size.0, self.window_size.1));
     }
 
     pub fn handle_key(&self, keycode: KeyCode) -> Option<InputCommand> {
@@ -42,10 +58,34 @@ impl InputSystem {
         }
     }
 
+    pub fn handle_mouse_button(&self, button: MouseButton, pressed: bool) -> Option<InputCommand> {
+        if !pressed {
+            return None;
+        }
+
+        match button {
+            MouseButton::Left => {
+                if let Some(ndc) = self.cursor_ndc {
+                    Some(InputCommand::Click { position: ndc })
+                } else {
+                    None
+                }
+            }
+            MouseButton::Right => {
+                if let Some(ndc) = self.cursor_ndc {
+                    Some(InputCommand::RightClick { position: ndc })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Convert physical pixel position to NDC coordinates
     pub fn physical_to_ndc(
         &self,
-        position: winit::dpi::PhysicalPosition<f64>,
+        position: PhysicalPosition<f64>,
         width: u32,
         height: u32,
     ) -> [f32; 2] {
@@ -68,4 +108,6 @@ impl InputSystem {
 pub enum InputCommand {
     Exit,
     TogglePause,
+    Click { position: [f32; 2] },
+    RightClick { position: [f32; 2] },
 }

@@ -19,6 +19,16 @@ struct CircleInstance {
     color: [f32; 3],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct RectInstance {
+    position: [f32; 2],
+    length: f32,
+    height: f32,
+    color: [f32; 3],
+    _padding: f32, // Align to 32 bytes
+}
+
 const QUAD_VERTICES: &[Vertex] = &[
     Vertex {
         position: [-1.0, -1.0],
@@ -111,11 +121,13 @@ pub struct Renderer {
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
-    size: winit::dpi::PhysicalSize<u32>,
+    pub size: winit::dpi::PhysicalSize<u32>,
 
-    render_pipeline: wgpu::RenderPipeline,
+    circle_pipeline: wgpu::RenderPipeline,
+    rect_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
-    instance_buffer: wgpu::Buffer,
+    circle_instance_buffer: wgpu::Buffer,
+    rect_instance_buffer: wgpu::Buffer,
 
     // Text rendering
     font_system: glyphon::FontSystem,
@@ -146,16 +158,17 @@ impl Renderer {
         let cap = surface.get_capabilities(&adapter);
         let surface_format = cap.formats[0];
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        // Circle shader and pipeline
+        let circle_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Circle Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shader.wgsl").into()),
         });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let circle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Circle Pipeline"),
             layout: None,
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &circle_shader,
                 entry_point: Some("vs_main"),
                 buffers: &[
                     wgpu::VertexBufferLayout {
@@ -176,7 +189,62 @@ impl Renderer {
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &circle_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let rect_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Rectangle Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../rectangle.wgsl").into()),
+        });
+
+        let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Rectangle Pipeline"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &rect_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                    },
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<RectInstance>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![
+                            1 => Float32x2,
+                            2 => Float32,
+                            3 => Float32,
+                            4 => Float32x3,
+                        ],
+                    },
+                ],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &rect_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
@@ -206,9 +274,16 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Instance Buffer"),
+        let circle_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Circle Instance Buffer"),
             size: (std::mem::size_of::<CircleInstance>() * 100) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let rect_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Rectangle Instance Buffer"),
+            size: (std::mem::size_of::<RectInstance>() * 100) as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -250,9 +325,11 @@ impl Renderer {
             surface,
             surface_format,
             size,
-            render_pipeline,
+            circle_pipeline,
+            rect_pipeline,
             vertex_buffer,
-            instance_buffer,
+            circle_instance_buffer,
+            rect_instance_buffer,
             font_system,
             swash_cache,
             viewport,
@@ -316,67 +393,57 @@ impl Renderer {
         self.text_dirty = true;
     }
 
-    fn prepare_text(&mut self) {
-        self.viewport.update(
-            &self.queue,
-            glyphon::Resolution {
-                width: self.size.width,
-                height: self.size.height,
-            },
-        );
-
-        let (w, h) = self.stats_buffer.size();
-        let text_width = w.unwrap_or(0.0);
-        let text_height = h.unwrap_or(0.0);
-
-        let margin = 12.0;
-        let left = (self.size.width as f32 - text_width - margin)
-            .max(margin)
-            .round();
-        let top = (self.size.height as f32 - text_height - margin)
-            .max(margin)
-            .round();
-
-        self.text_renderer
-            .prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                [glyphon::TextArea {
-                    buffer: &self.stats_buffer,
-                    left,
-                    top,
-                    scale: 1.0,
-                    bounds: glyphon::TextBounds::default(),
-                    default_color: glyphon::Color::rgb(255, 255, 160),
-                    custom_glyphs: &[],
-                }],
-                &mut self.swash_cache,
-            )
-            .unwrap();
-    }
-
     pub fn render(&mut self, world: &World) {
         self.frame_stats.render_count += 1;
 
-        // Collect circle instances from world
+        // Collect circle and rectangle instances from world
         let mut circles = Vec::new();
+        let mut rectangles = Vec::new();
+
         for entity in world.entities() {
-            if let Shape::Circle { radius, color } = entity.shape() {
-                let transform = entity.transform();
-                circles.push(CircleInstance {
-                    position: transform.position,
-                    radius: *radius,
-                    color: *color,
-                });
+            match entity.shape() {
+                Shape::Circle { radius, color } => {
+                    let transform = entity.transform();
+                    circles.push(CircleInstance {
+                        position: transform.position,
+                        radius: *radius,
+                        color: *color,
+                    });
+                }
+                Shape::Rectangle {
+                    length,
+                    height,
+                    color,
+                } => {
+                    let transform = entity.transform();
+                    rectangles.push(RectInstance {
+                        position: transform.position,
+                        length: *length,
+                        height: *height,
+                        color: *color,
+                        _padding: 0.0,
+                    });
+                }
+                _ => {}
             }
         }
 
         // Upload instances
-        self.queue
-            .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&circles));
+        if !circles.is_empty() {
+            self.queue.write_buffer(
+                &self.circle_instance_buffer,
+                0,
+                bytemuck::cast_slice(&circles),
+            );
+        }
+
+        if !rectangles.is_empty() {
+            self.queue.write_buffer(
+                &self.rect_instance_buffer,
+                0,
+                bytemuck::cast_slice(&rectangles),
+            );
+        }
 
         // Prepare text from entities
         let mut text_areas = Vec::new();
@@ -387,7 +454,6 @@ impl Renderer {
                 content, font_size, ..
             } = entity.shape()
             {
-                // Create a temporary buffer for this text
                 let mut buffer = glyphon::Buffer::new(
                     &mut self.font_system,
                     glyphon::Metrics::new(*font_size, font_size * 1.4),
@@ -407,22 +473,16 @@ impl Renderer {
             }
         }
 
-        // Build text areas (need to borrow buffers after they're all created)
-        for (_, entity) in world.entities().iter().enumerate() {
-            if let Shape::Text {
-                content: _,
-                font_size: _,
-                color,
-            } = entity.shape()
-            {
+        // Build text areas
+        let mut text_idx = 0;
+        for entity in world.entities() {
+            if let Shape::Text { color, .. } = entity.shape() {
                 let transform = entity.transform();
 
                 let screen_x = ((transform.position[0] + 1.0) / 2.0) * self.size.width as f32;
                 let screen_y = ((1.0 - transform.position[1]) / 2.0) * self.size.height as f32;
 
-                // Find corresponding buffer index
-                let buffer_idx = circles.len() + text_areas.len();
-                if let Some(buffer) = text_buffers.get(buffer_idx - circles.len()) {
+                if let Some(buffer) = text_buffers.get(text_idx) {
                     text_areas.push(glyphon::TextArea {
                         buffer,
                         left: screen_x,
@@ -436,14 +496,9 @@ impl Renderer {
                         ),
                         custom_glyphs: &[],
                     });
+                    text_idx += 1;
                 }
             }
-        }
-
-        // Prepare stats text
-        if self.text_dirty {
-            self.prepare_text();
-            self.text_dirty = false;
         }
 
         // Update viewport
@@ -513,10 +568,21 @@ impl Renderer {
                 ..Default::default()
             });
 
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            render_pass.draw(0..6, 0..circles.len() as u32);
+            // Draw circles
+            if !circles.is_empty() {
+                render_pass.set_pipeline(&self.circle_pipeline);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.set_vertex_buffer(1, self.circle_instance_buffer.slice(..));
+                render_pass.draw(0..6, 0..circles.len() as u32);
+            }
+
+            // Draw rectangles
+            if !rectangles.is_empty() {
+                render_pass.set_pipeline(&self.rect_pipeline);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass.set_vertex_buffer(1, self.rect_instance_buffer.slice(..));
+                render_pass.draw(0..6, 0..rectangles.len() as u32);
+            }
 
             self.text_renderer
                 .render(&mut self.atlas, &mut self.viewport, &mut render_pass)
