@@ -20,9 +20,14 @@ pub struct Physics {
     pub velocity: [f32; 2],
     pub acceleration: [f32; 2],
     pub mass: f32,
-    pub apply_gravity: bool,
-    pub moveable: bool,
-    pub collision: bool,
+
+    // behavior flags
+    pub apply_gravity: bool, // Entity recieves gravitational acceleration every tick
+    pub dynamic: bool,       // Entity moves, responds to collisions
+
+    // collision properties
+    pub restitution: f32,
+    pub friction: f32,
 }
 
 impl Physics {
@@ -32,8 +37,18 @@ impl Physics {
             acceleration: [0.0, 0.0],
             mass: 1.0,
             apply_gravity: true,
-            moveable: true,
-            collision: true,
+            dynamic: true,
+            restitution: 0.8,
+            friction: 0.5,
+        }
+    }
+    pub fn new_static() -> Self {
+        Self {
+            mass: f32::INFINITY, // infinite mass = immoveable
+            dynamic: false,
+            apply_gravity: false,
+            restitution: 0.5,
+            ..Self::new()
         }
     }
 
