@@ -50,6 +50,11 @@ pub enum Shape {
         font_size: f32,
         color: [f32; 3],
     },
+    Rectangle {
+        length: f32,
+        height: f32,
+        color: [f32; 3],
+    },
 }
 
 #[derive(Clone, Copy, Debug)]

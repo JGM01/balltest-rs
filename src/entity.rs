@@ -15,6 +15,12 @@ pub enum Entity {
         shape: Shape, // Must be Shape::Text variant
         clickable: Option<Clickable>,
     },
+    Rectangle {
+        transform: Transform,
+        physics: Option<Physics>,
+        shape: Shape, // Must be Shape::Rectangle variant
+        clickable: Option<Clickable>,
+    },
 }
 
 impl Entity {
@@ -24,6 +30,18 @@ impl Entity {
             transform: Transform::new(position),
             physics: None,
             shape: Shape::Circle { radius, color },
+            clickable: None,
+        }
+    }
+    pub fn new_rectangle(position: [f32; 2], length: f32, height: f32, color: [f32; 3]) -> Self {
+        Entity::Rectangle {
+            transform: Transform::new(position),
+            physics: None,
+            shape: Shape::Rectangle {
+                length,
+                height,
+                color,
+            },
             clickable: None,
         }
     }
@@ -54,7 +72,9 @@ impl Entity {
 
     pub fn with_clickable(mut self, clickable: Clickable) -> Self {
         match &mut self {
-            Entity::Circle { clickable: c, .. } | Entity::Text { clickable: c, .. } => {
+            Entity::Circle { clickable: c, .. }
+            | Entity::Text { clickable: c, .. }
+            | Entity::Rectangle { clickable: c, .. } => {
                 *c = Some(clickable);
             }
         }
@@ -64,27 +84,33 @@ impl Entity {
     // Component accessors (immutable)
     pub fn transform(&self) -> &Transform {
         match self {
-            Entity::Circle { transform, .. } | Entity::Text { transform, .. } => transform,
+            Entity::Circle { transform, .. }
+            | Entity::Text { transform, .. }
+            | Entity::Rectangle { transform, .. } => transform,
         }
     }
 
     pub fn transform_mut(&mut self) -> &mut Transform {
         match self {
-            Entity::Circle { transform, .. } | Entity::Text { transform, .. } => transform,
+            Entity::Circle { transform, .. }
+            | Entity::Text { transform, .. }
+            | Entity::Rectangle { transform, .. } => transform,
         }
     }
 
     pub fn physics(&self) -> Option<&Physics> {
         match self {
-            Entity::Circle { physics, .. } => physics.as_ref(),
-            Entity::Text { .. } => None,
+            Entity::Circle { physics, .. }
+            | Entity::Text { physics, .. }
+            | Entity::Rectangle { physics, .. } => physics.as_ref(),
         }
     }
 
     pub fn physics_mut(&mut self) -> Option<&mut Physics> {
         match self {
-            Entity::Circle { physics, .. } => physics.as_mut(),
-            Entity::Text { .. } => None,
+            Entity::Circle { physics, .. }
+            | Entity::Text { physics, .. }
+            | Entity::Rectangle { physics, .. } => physics.as_mut(),
         }
     }
     pub fn physics_and_transform_mut(&mut self) -> Option<(&mut Physics, &mut Transform)> {
@@ -99,31 +125,44 @@ impl Entity {
                 transform,
                 ..
             } => Some((p, transform)),
+            Entity::Rectangle {
+                physics: Some(p),
+                transform,
+                ..
+            } => Some((p, transform)),
             _ => None,
         }
     }
 
     pub fn shape(&self) -> &Shape {
         match self {
-            Entity::Circle { shape, .. } | Entity::Text { shape, .. } => shape,
+            Entity::Circle { shape, .. }
+            | Entity::Text { shape, .. }
+            | Entity::Rectangle { shape, .. } => shape,
         }
     }
 
     pub fn shape_mut(&mut self) -> &mut Shape {
         match self {
-            Entity::Circle { shape, .. } | Entity::Text { shape, .. } => shape,
+            Entity::Circle { shape, .. }
+            | Entity::Text { shape, .. }
+            | Entity::Rectangle { shape, .. } => shape,
         }
     }
 
     pub fn clickable(&self) -> Option<&Clickable> {
         match self {
-            Entity::Circle { clickable, .. } | Entity::Text { clickable, .. } => clickable.as_ref(),
+            Entity::Circle { clickable, .. }
+            | Entity::Text { clickable, .. }
+            | Entity::Rectangle { clickable, .. } => clickable.as_ref(),
         }
     }
 
     pub fn clickable_mut(&mut self) -> Option<&mut Clickable> {
         match self {
-            Entity::Circle { clickable, .. } | Entity::Text { clickable, .. } => clickable.as_mut(),
+            Entity::Circle { clickable, .. }
+            | Entity::Text { clickable, .. }
+            | Entity::Rectangle { clickable, .. } => clickable.as_mut(),
         }
     }
 }
