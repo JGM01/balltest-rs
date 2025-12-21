@@ -40,6 +40,21 @@ impl App {
                 .with_clickable(Clickable::new()),
         );
 
+        let floor_physics = Physics {
+            velocity: [0.0, 0.0],
+            acceleration: [0.0, 0.0],
+            mass: 0.0,
+            apply_gravity: false,
+            moveable: false,
+            collision: true,
+        };
+
+        // floor
+        world.add_entity(
+            Entity::new_rectangle([0.0, -0.9], 2.0, 0.1, [1.0, 1.0, 1.0])
+                .with_physics(floor_physics),
+        );
+
         world.add_entity(
             Entity::new_circle([0.5, 0.5], 0.2, [0.0, 1.0, 0.0]).with_clickable(Clickable::new()),
         );

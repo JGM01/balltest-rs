@@ -1,4 +1,4 @@
-use crate::world::World;
+use crate::{components::Shape, world::World};
 use std::time::Duration;
 
 pub struct PhysicsSystem {

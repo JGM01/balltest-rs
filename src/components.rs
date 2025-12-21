@@ -21,6 +21,8 @@ pub struct Physics {
     pub acceleration: [f32; 2],
     pub mass: f32,
     pub apply_gravity: bool,
+    pub moveable: bool,
+    pub collision: bool,
 }
 
 impl Physics {
@@ -30,6 +32,8 @@ impl Physics {
             acceleration: [0.0, 0.0],
             mass: 1.0,
             apply_gravity: true,
+            moveable: true,
+            collision: true,
         }
     }
 
@@ -51,8 +55,8 @@ pub enum Shape {
         color: [f32; 3],
     },
     Rectangle {
-        length: f32,
-        height: f32,
+        length: f32, // NDC
+        height: f32, // NDC
         color: [f32; 3],
     },
 }
