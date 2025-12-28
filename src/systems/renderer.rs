@@ -1,4 +1,4 @@
-use crate::components::Shape;
+use crate::components::Appearance;
 use crate::world::World;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -396,39 +396,41 @@ impl Renderer {
     pub fn render(&mut self, world: &World) {
         self.frame_stats.render_count += 1;
 
-        // Collect circle and rectangle instances from world
-        let mut circles = Vec::new();
-        let mut rectangles = Vec::new();
+        // Collect render instances from Appearance + Transform components
+        let mut circles: Vec<CircleInstance> = Vec::new();
+        let mut rectangles: Vec<RectInstance> = Vec::new();
 
         for entity in world.entities() {
-            match entity.shape() {
-                Shape::Circle { radius, color } => {
-                    let transform = entity.transform();
+            let transform = &entity.transform;
+
+            match &entity.appearance {
+                Appearance::Circle { radius, color } => {
                     circles.push(CircleInstance {
                         position: transform.position,
                         radius: *radius,
                         color: *color,
                     });
                 }
-                Shape::Rectangle {
-                    length,
+
+                Appearance::Rectangle {
+                    width,
                     height,
                     color,
                 } => {
-                    let transform = entity.transform();
                     rectangles.push(RectInstance {
                         position: transform.position,
-                        length: *length,
+                        length: *width,
                         height: *height,
                         color: *color,
                         _padding: 0.0,
                     });
                 }
+
                 _ => {}
             }
         }
 
-        // Upload instances
+        // Upload instance data
         if !circles.is_empty() {
             self.queue.write_buffer(
                 &self.circle_instance_buffer,
@@ -445,14 +447,13 @@ impl Renderer {
             );
         }
 
-        // Prepare text from entities
-        let mut text_areas = Vec::new();
-        let mut text_buffers = Vec::new();
+        // Build text buffers from text entities
+        let mut text_buffers: Vec<glyphon::Buffer> = Vec::new();
 
         for entity in world.entities() {
-            if let Shape::Text {
+            if let Appearance::Text {
                 content, font_size, ..
-            } = entity.shape()
+            } = &entity.appearance
             {
                 let mut buffer = glyphon::Buffer::new(
                     &mut self.font_system,
@@ -473,16 +474,18 @@ impl Renderer {
             }
         }
 
-        // Build text areas
-        let mut text_idx = 0;
+        // Build text areas (screen-space positioning)
+        let mut text_areas: Vec<glyphon::TextArea> = Vec::new();
+        let mut text_index = 0;
+
         for entity in world.entities() {
-            if let Shape::Text { color, .. } = entity.shape() {
-                let transform = entity.transform();
+            if let Appearance::Text { color, .. } = &entity.appearance {
+                let transform = &entity.transform;
 
-                let screen_x = ((transform.position[0] + 1.0) / 2.0) * self.size.width as f32;
-                let screen_y = ((1.0 - transform.position[1]) / 2.0) * self.size.height as f32;
+                let screen_x = ((transform.position[0] + 1.0) * 0.5) * self.size.width as f32;
+                let screen_y = ((1.0 - transform.position[1]) * 0.5) * self.size.height as f32;
 
-                if let Some(buffer) = text_buffers.get(text_idx) {
+                if let Some(buffer) = text_buffers.get(text_index) {
                     text_areas.push(glyphon::TextArea {
                         buffer,
                         left: screen_x,
@@ -496,12 +499,13 @@ impl Renderer {
                         ),
                         custom_glyphs: &[],
                     });
-                    text_idx += 1;
+
+                    text_index += 1;
                 }
             }
         }
 
-        // Update viewport
+        // Update glyphon viewport
         self.viewport.update(
             &self.queue,
             glyphon::Resolution {
@@ -510,15 +514,15 @@ impl Renderer {
             },
         );
 
-        // Prepare all text (entity text + stats)
+        // Add stats overlay text
         let (w, h) = self.stats_buffer.size();
-        let stats_width = w.unwrap_or(0.0);
-        let stats_height = h.unwrap_or(0.0);
         let margin = 12.0;
-        let stats_left = (self.size.width as f32 - stats_width - margin)
+
+        let stats_left = (self.size.width as f32 - w.unwrap_or(0.0) - margin)
             .max(margin)
             .round();
-        let stats_top = (self.size.height as f32 - stats_height - margin)
+
+        let stats_top = (self.size.height as f32 - h.unwrap_or(0.0) - margin)
             .max(margin)
             .round();
 
@@ -545,6 +549,7 @@ impl Renderer {
             )
             .unwrap();
 
+        // Render pass
         let surface_texture = self.surface.get_current_texture().unwrap();
         let view = surface_texture
             .texture
@@ -568,7 +573,6 @@ impl Renderer {
                 ..Default::default()
             });
 
-            // Draw circles
             if !circles.is_empty() {
                 render_pass.set_pipeline(&self.circle_pipeline);
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
@@ -576,7 +580,6 @@ impl Renderer {
                 render_pass.draw(0..6, 0..circles.len() as u32);
             }
 
-            // Draw rectangles
             if !rectangles.is_empty() {
                 render_pass.set_pipeline(&self.rect_pipeline);
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
@@ -592,6 +595,7 @@ impl Renderer {
         self.queue.submit([encoder.finish()]);
         surface_texture.present();
 
+        // Frame timing & stats
         let now = Instant::now();
         let dt = now - self.frame_stats.last_present;
         self.frame_stats.last_present = now;

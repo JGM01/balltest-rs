@@ -1,8 +1,10 @@
+use crate::collision::{CircleShape, CollisionShape, RectangleShape};
+
 #[derive(Clone, Copy, Debug)]
 pub struct Transform {
-    pub position: [f32; 2], // NDC
-    pub rotation: f32,      // radians
-    pub scale: [f32; 2],    // NDC
+    pub position: [f32; 2],
+    pub rotation: f32,
+    pub scale: [f32; 2],
 }
 
 impl Transform {
@@ -20,12 +22,8 @@ pub struct Physics {
     pub velocity: [f32; 2],
     pub acceleration: [f32; 2],
     pub mass: f32,
-
-    // behavior flags
-    pub apply_gravity: bool, // Entity recieves gravitational acceleration every tick
-    pub dynamic: bool,       // Entity moves, responds to collisions
-
-    // collision properties
+    pub apply_gravity: bool,
+    pub dynamic: bool,
     pub restitution: f32,
     pub friction: f32,
 }
@@ -42,9 +40,10 @@ impl Physics {
             friction: 0.5,
         }
     }
+
     pub fn new_static() -> Self {
         Self {
-            mass: f32::INFINITY, // infinite mass = immoveable
+            mass: f32::INFINITY,
             dynamic: false,
             apply_gravity: false,
             restitution: 0.5,
@@ -58,22 +57,62 @@ impl Physics {
     }
 }
 
+/// Visual appearance of an entity
+/// This is separate from collision shape
 #[derive(Clone, Debug)]
-pub enum Shape {
+pub enum Appearance {
     Circle {
-        radius: f32,     // NDC
-        color: [f32; 3], // RGB-format
-    },
-    Text {
-        content: String, // I.E. "Hey whats up guys"
-        font_size: f32,
+        radius: f32,
         color: [f32; 3],
     },
     Rectangle {
-        length: f32, // NDC
-        height: f32, // NDC
+        width: f32,
+        height: f32,
         color: [f32; 3],
     },
+    Text {
+        content: String,
+        font_size: f32,
+        color: [f32; 3],
+    },
+}
+
+/// Collision geometry component
+/// Uses trait objects to support any collision shape
+#[derive(Clone, Debug)]
+pub struct Collider {
+    // We use Box<dyn> here to allow any type implementing CollisionShape
+    // This is dynamic dispatch - there's a tiny performance cost but huge flexibility gain
+    shape: ColliderShape,
+}
+
+// We need our own enum because trait objects can't be cloned directly
+#[derive(Clone, Debug)]
+enum ColliderShape {
+    Circle(CircleShape),
+    Rectangle(RectangleShape),
+}
+
+impl Collider {
+    pub fn circle(radius: f32) -> Self {
+        Self {
+            shape: ColliderShape::Circle(CircleShape { radius }),
+        }
+    }
+
+    pub fn rectangle(width: f32, height: f32) -> Self {
+        Self {
+            shape: ColliderShape::Rectangle(RectangleShape::new(width, height)),
+        }
+    }
+
+    /// Get the collision shape for collision detection
+    pub fn shape(&self) -> &dyn CollisionShape {
+        match &self.shape {
+            ColliderShape::Circle(s) => s,
+            ColliderShape::Rectangle(s) => s,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
