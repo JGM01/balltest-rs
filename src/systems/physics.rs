@@ -1,237 +1,270 @@
-use crate::collision::detect_collision;
+// src/systems/physics.rs
+use crate::collision_system::{CollisionManifold, CollisionSystem};
+use crate::shape::Vec2;
 use crate::world::World;
 use std::time::Duration;
 
 pub struct PhysicsSystem {
-    gravity: [f32; 2],
-    collision_iterations: u32,
+    gravity: Vec2,
+    collision_system: CollisionSystem,
+    position_iterations: usize,
+    velocity_iterations: usize,
 }
 
 impl PhysicsSystem {
     pub fn new() -> Self {
         Self {
-            gravity: [0.0, -0.5],
-            collision_iterations: 4,
+            gravity: Vec2::new(0.0, -9.8),
+            collision_system: CollisionSystem::new(),
+            position_iterations: 2,
+            velocity_iterations: 6,
         }
     }
 
     pub fn update(&mut self, world: &mut World, dt: Duration) {
         let dt_secs = dt.as_secs_f32();
 
-        // Phase 1: Apply forces and integrate velocity
+        // Phase 1: Apply forces and integrate velocities
         for entity in world.entities_mut() {
-            if let Some(physics) = &mut entity.physics {
-                if !physics.dynamic {
+            if let Some(rb) = &mut entity.rigid_body {
+                if rb.is_static {
                     continue;
                 }
-                // Reset acceleration
-                physics.acceleration = [0.0, 0.0];
 
                 // Apply gravity
-                if physics.apply_gravity {
-                    physics.acceleration[0] += self.gravity[0];
-                    physics.acceleration[1] += self.gravity[1];
-                }
+                let gravity_force = self.gravity * rb.mass;
+                rb.apply_force(gravity_force);
 
                 // Integrate velocity
-                physics.velocity[0] += physics.acceleration[0] * dt_secs;
-                physics.velocity[1] += physics.acceleration[1] * dt_secs;
+                let acceleration = rb.force * rb.inv_mass;
+                rb.velocity = rb.velocity + acceleration * dt_secs;
+
+                // Integrate angular velocity
+                let angular_acc = rb.torque * rb.inv_inertia;
+                rb.angular_velocity += angular_acc * dt_secs;
 
                 // Apply damping
-                physics.velocity[0] *= 0.98;
-                physics.velocity[1] *= 0.98;
+                rb.velocity = rb.velocity * rb.linear_damping;
+                rb.angular_velocity *= rb.angular_damping;
 
-                // Sleep threshold
-                let speed_sq = physics.velocity[0].powi(2) + physics.velocity[1].powi(2);
-                if speed_sq < 1e-6 {
-                    physics.velocity = [0.0, 0.0];
-                }
+                // Reset forces
+                rb.force = Vec2::zero();
+                rb.torque = 0.0;
             }
         }
 
-        // Phase 2: Integrate position
+        // Phase 2: Integrate positions (semi-implicit Euler)
         for entity in world.entities_mut() {
-            if let Some(physics) = &entity.physics {
-                if physics.dynamic {
-                    entity.transform.position[0] += physics.velocity[0] * dt_secs;
-                    entity.transform.position[1] += physics.velocity[1] * dt_secs;
-                }
-            }
-        }
-
-        // Phase 3: Collision detection and resolution
-        for _ in 0..self.collision_iterations {
-            self.resolve_collisions(world);
-        }
-    }
-
-    fn resolve_collisions(&mut self, world: &mut World) {
-        let entity_count = world.entities().len();
-
-        for i in 0..entity_count {
-            for j in (i + 1)..entity_count {
-                // Check if both entities have colliders
-                let (has_collider_i, has_collider_j) = {
-                    let entities = world.entities();
-                    (
-                        entities[i].collider.is_some(),
-                        entities[j].collider.is_some(),
-                    )
-                };
-
-                if !has_collider_i || !has_collider_j {
+            if let Some(rb) = &entity.rigid_body {
+                if rb.is_static {
                     continue;
                 }
 
-                // Detect collision using our unified system
-                let manifold = {
-                    let entities = world.entities();
-                    let collider_a = entities[i].collider.as_ref().unwrap();
-                    let collider_b = entities[j].collider.as_ref().unwrap();
+                entity.transform.position[0] += rb.velocity.x * dt_secs;
+                entity.transform.position[1] += rb.velocity.y * dt_secs;
+                entity.transform.rotation += rb.angular_velocity * dt_secs;
+            }
+        }
 
-                    detect_collision(
-                        collider_a.shape(),
-                        &entities[i].transform,
-                        collider_b.shape(),
-                        &entities[j].transform,
-                    )
-                };
+        // Phase 3: Collision detection
+        let collider_data: Vec<_> = world
+            .entities()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, e)| e.collider.as_ref().map(|c| (idx, c, &e.transform)))
+            .collect();
 
-                if let Some(manifold) = manifold {
-                    self.resolve_collision(world, i, j, manifold);
-                }
+        let pairs = self.collision_system.broad_phase(&collider_data);
+        self.collision_system.narrow_phase(pairs, &collider_data);
+
+        // Phase 4: Solve collisions
+        for _ in 0..self.velocity_iterations {
+            for manifold in &self.collision_system.manifolds.clone() {
+                self.solve_velocity(world, manifold);
+            }
+        }
+
+        for _ in 0..self.position_iterations {
+            for manifold in &self.collision_system.manifolds.clone() {
+                self.solve_position(world, manifold);
             }
         }
     }
 
-    fn resolve_collision(
-        &mut self,
-        world: &mut World,
-        idx_a: usize,
-        idx_b: usize,
-        manifold: crate::collision::CollisionManifold,
-    ) {
-        // Get physics properties
-        let (mass_a, mass_b, dynamic_a, dynamic_b, rest_a, rest_b, fric_a, fric_b) = {
-            let entities = world.entities();
-            let phys_a = entities[idx_a].physics.as_ref();
-            let phys_b = entities[idx_b].physics.as_ref();
+    fn solve_velocity(&self, world: &mut World, manifold: &CollisionManifold) {
+        let entities = world.entities();
 
-            (
-                phys_a.map(|p| p.mass).unwrap_or(f32::INFINITY),
-                phys_b.map(|p| p.mass).unwrap_or(f32::INFINITY),
-                phys_a.map(|p| p.dynamic).unwrap_or(false),
-                phys_b.map(|p| p.dynamic).unwrap_or(false),
-                phys_a.map(|p| p.restitution).unwrap_or(0.5),
-                phys_b.map(|p| p.restitution).unwrap_or(0.5),
-                phys_a.map(|p| p.friction).unwrap_or(0.3),
-                phys_b.map(|p| p.friction).unwrap_or(0.3),
-            )
-        };
+        let rb_a = entities[manifold.entity_a].rigid_body.as_ref();
+        let rb_b = entities[manifold.entity_b].rigid_body.as_ref();
 
-        if !dynamic_a && !dynamic_b {
+        if rb_a.is_none() || rb_b.is_none() {
             return;
         }
 
-        // Calculate inverse masses
-        let inv_mass_a = if dynamic_a && mass_a.is_finite() {
-            1.0 / mass_a
-        } else {
-            0.0
-        };
-        let inv_mass_b = if dynamic_b && mass_b.is_finite() {
-            1.0 / mass_b
-        } else {
-            0.0
-        };
-        let total_inv_mass = inv_mass_a + inv_mass_b;
-
-        // Position correction
-        if total_inv_mass > 0.0 {
-            let correction_percent = 0.8;
-            let slop = 0.01;
-            let correction_depth = (manifold.penetration - slop).max(0.0);
-
-            let entities = world.entities_mut();
-
-            if dynamic_a && inv_mass_a > 0.0 {
-                let ratio = inv_mass_a / total_inv_mass;
-                let correction = correction_depth * ratio * correction_percent;
-                entities[idx_a].transform.position[0] -= manifold.normal[0] * correction;
-                entities[idx_a].transform.position[1] -= manifold.normal[1] * correction;
-            }
-
-            if dynamic_b && inv_mass_b > 0.0 {
-                let ratio = inv_mass_b / total_inv_mass;
-                let correction = correction_depth * ratio * correction_percent;
-                entities[idx_b].transform.position[0] += manifold.normal[0] * correction;
-                entities[idx_b].transform.position[1] += manifold.normal[1] * correction;
-            }
-        }
-
-        // Velocity resolution
-        let (vel_a, vel_b) = {
-            let entities = world.entities();
+        let (inv_mass_a, inv_inertia_a, vel_a, ang_vel_a, rest_a, fric_a) = {
+            let rb = rb_a.unwrap();
             (
-                entities[idx_a]
-                    .physics
-                    .as_ref()
-                    .map(|p| p.velocity)
-                    .unwrap_or([0.0, 0.0]),
-                entities[idx_b]
-                    .physics
-                    .as_ref()
-                    .map(|p| p.velocity)
-                    .unwrap_or([0.0, 0.0]),
+                rb.inv_mass,
+                rb.inv_inertia,
+                rb.velocity,
+                rb.angular_velocity,
+                rb.restitution,
+                rb.friction,
             )
         };
 
-        let rel_vel = [vel_a[0] - vel_b[0], vel_a[1] - vel_b[1]];
-        let vel_along_normal = rel_vel[0] * manifold.normal[0] + rel_vel[1] * manifold.normal[1];
+        let (inv_mass_b, inv_inertia_b, vel_b, ang_vel_b, rest_b, fric_b) = {
+            let rb = rb_b.unwrap();
+            (
+                rb.inv_mass,
+                rb.inv_inertia,
+                rb.velocity,
+                rb.angular_velocity,
+                rb.restitution,
+                rb.friction,
+            )
+        };
 
-        // Don't resolve if separating
+        if inv_mass_a == 0.0 && inv_mass_b == 0.0 {
+            return;
+        }
+
+        let pos_a = Vec2::new(
+            entities[manifold.entity_a].transform.position[0],
+            entities[manifold.entity_a].transform.position[1],
+        );
+        let pos_b = Vec2::new(
+            entities[manifold.entity_b].transform.position[0],
+            entities[manifold.entity_b].transform.position[1],
+        );
+
+        // Contact points relative to centers
+        let ra = manifold.contact_point - pos_a;
+        let rb_vec = manifold.contact_point - pos_b;
+
+        // Relative velocity at contact point
+        let vel_a_at_contact = vel_a + Vec2::new(-ang_vel_a * ra.y, ang_vel_a * ra.x);
+        let vel_b_at_contact = vel_b + Vec2::new(-ang_vel_b * rb_vec.y, ang_vel_b * rb_vec.x);
+        let rel_vel = vel_b_at_contact - vel_a_at_contact;
+
+        // Velocity along normal
+        let vel_along_normal = rel_vel.dot(&manifold.normal);
+
+        // Don't resolve if velocities are separating
         if vel_along_normal > 0.0 {
             return;
         }
 
-        // Use zero restitution for resting contacts
-        let restitution = if vel_along_normal.abs() < 0.1 {
-            0.0
-        } else {
-            (rest_a * rest_b).sqrt()
-        };
+        // Calculate restitution
+        let restitution = (rest_a * rest_b).sqrt();
 
-        // Calculate impulse
-        let j = -(1.0 + restitution) * vel_along_normal / total_inv_mass;
-        let impulse_n = [manifold.normal[0] * j, manifold.normal[1] * j];
+        // Calculate impulse scalar
+        let ra_perp_dot = ra.perp().dot(&manifold.normal);
+        let rb_perp_dot = rb_vec.perp().dot(&manifold.normal);
+
+        let impulse_scalar = -(1.0 + restitution) * vel_along_normal
+            / (inv_mass_a
+                + inv_mass_b
+                + ra_perp_dot * ra_perp_dot * inv_inertia_a
+                + rb_perp_dot * rb_perp_dot * inv_inertia_b);
+
+        let impulse = manifold.normal * impulse_scalar;
+
+        // Apply normal impulse
+        let entities = world.entities_mut();
+
+        if let Some(rb) = entities[manifold.entity_a].rigid_body.as_mut() {
+            rb.apply_impulse(-impulse);
+            rb.apply_angular_impulse(-ra.cross(&impulse));
+        }
+
+        if let Some(rb) = entities[manifold.entity_b].rigid_body.as_mut() {
+            rb.apply_impulse(impulse);
+            rb.apply_angular_impulse(rb_vec.cross(&impulse));
+        }
 
         // Friction
-        let tangent = [-manifold.normal[1], manifold.normal[0]];
-        let vel_along_tangent = rel_vel[0] * tangent[0] + rel_vel[1] * tangent[1];
+        let entities = world.entities();
+        let rb_a = entities[manifold.entity_a].rigid_body.as_ref().unwrap();
+        let rb_b = entities[manifold.entity_b].rigid_body.as_ref().unwrap();
+
+        let vel_a_at_contact =
+            rb_a.velocity + Vec2::new(-rb_a.angular_velocity * ra.y, rb_a.angular_velocity * ra.x);
+        let vel_b_at_contact = rb_b.velocity
+            + Vec2::new(
+                -rb_b.angular_velocity * rb_vec.y,
+                rb_b.angular_velocity * rb_vec.x,
+            );
+        let rel_vel = vel_b_at_contact - vel_a_at_contact;
+
+        let tangent = (rel_vel - manifold.normal * rel_vel.dot(&manifold.normal)).normalized();
+        let vel_along_tangent = rel_vel.dot(&tangent);
+
+        if vel_along_tangent.abs() < 1e-6 {
+            return;
+        }
+
         let friction = (fric_a + fric_b) * 0.5;
-        let friction_mag =
-            (-vel_along_tangent / total_inv_mass).clamp(-j.abs() * friction, j.abs() * friction);
-        let impulse_t = [tangent[0] * friction_mag, tangent[1] * friction_mag];
 
-        let total_impulse = [impulse_n[0] + impulse_t[0], impulse_n[1] + impulse_t[1]];
+        let friction_impulse_scalar = -vel_along_tangent
+            / (inv_mass_a
+                + inv_mass_b
+                + ra.perp().dot(&tangent).powi(2) * inv_inertia_a
+                + rb_vec.perp().dot(&tangent).powi(2) * inv_inertia_b);
 
-        // Apply impulses
-        {
-            let entities = world.entities_mut();
+        let max_friction = impulse_scalar.abs() * friction;
+        let friction_impulse_scalar = friction_impulse_scalar.clamp(-max_friction, max_friction);
+        let friction_impulse = tangent * friction_impulse_scalar;
 
-            if dynamic_a && inv_mass_a > 0.0 {
-                if let Some(physics) = &mut entities[idx_a].physics {
-                    physics.velocity[0] -= total_impulse[0] * inv_mass_a;
-                    physics.velocity[1] -= total_impulse[1] * inv_mass_a;
-                }
-            }
+        let entities = world.entities_mut();
 
-            if dynamic_b && inv_mass_b > 0.0 {
-                if let Some(physics) = &mut entities[idx_b].physics {
-                    physics.velocity[0] += total_impulse[0] * inv_mass_b;
-                    physics.velocity[1] += total_impulse[1] * inv_mass_b;
-                }
-            }
+        if let Some(rb) = entities[manifold.entity_a].rigid_body.as_mut() {
+            rb.apply_impulse(-friction_impulse);
+            rb.apply_angular_impulse(-ra.cross(&friction_impulse));
+        }
+
+        if let Some(rb) = entities[manifold.entity_b].rigid_body.as_mut() {
+            rb.apply_impulse(friction_impulse);
+            rb.apply_angular_impulse(rb_vec.cross(&friction_impulse));
+        }
+    }
+
+    fn solve_position(&self, world: &mut World, manifold: &CollisionManifold) {
+        let entities = world.entities();
+
+        let rb_a = entities[manifold.entity_a].rigid_body.as_ref();
+        let rb_b = entities[manifold.entity_b].rigid_body.as_ref();
+
+        if rb_a.is_none() || rb_b.is_none() {
+            return;
+        }
+
+        let inv_mass_a = rb_a.unwrap().inv_mass;
+        let inv_mass_b = rb_b.unwrap().inv_mass;
+
+        if inv_mass_a == 0.0 && inv_mass_b == 0.0 {
+            return;
+        }
+
+        let slop = 0.01;
+        let percent = 0.4;
+
+        let correction =
+            (manifold.penetration - slop).max(0.0) / (inv_mass_a + inv_mass_b) * percent;
+        let correction_vec = manifold.normal * correction;
+
+        let entities = world.entities_mut();
+
+        if inv_mass_a > 0.0 {
+            let entity = &mut entities[manifold.entity_a];
+            entity.transform.position[0] -= correction_vec.x * inv_mass_a;
+            entity.transform.position[1] -= correction_vec.y * inv_mass_a;
+        }
+
+        if inv_mass_b > 0.0 {
+            let entity = &mut entities[manifold.entity_b];
+            entity.transform.position[0] += correction_vec.x * inv_mass_b;
+            entity.transform.position[1] += correction_vec.y * inv_mass_b;
         }
     }
 }

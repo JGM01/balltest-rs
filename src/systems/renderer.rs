@@ -276,14 +276,14 @@ impl Renderer {
 
         let circle_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Circle Instance Buffer"),
-            size: (std::mem::size_of::<CircleInstance>() * 100) as wgpu::BufferAddress,
+            size: (std::mem::size_of::<CircleInstance>() * 1000) as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let rect_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Rectangle Instance Buffer"),
-            size: (std::mem::size_of::<RectInstance>() * 100) as wgpu::BufferAddress,
+            size: (std::mem::size_of::<RectInstance>() * 1000) as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -393,42 +393,82 @@ impl Renderer {
         self.text_dirty = true;
     }
 
-    pub fn render(&mut self, world: &World) {
-        self.frame_stats.render_count += 1;
-
-        // Collect render instances from Appearance + Transform components
-        let mut circles: Vec<CircleInstance> = Vec::new();
-        let mut rectangles: Vec<RectInstance> = Vec::new();
+    fn collect_instances_from_world(
+        &self,
+        world: &World,
+    ) -> (Vec<CircleInstance>, Vec<RectInstance>) {
+        let mut circles = Vec::new();
+        let mut rectangles = Vec::new();
 
         for entity in world.entities() {
-            let transform = &entity.transform;
+            self.process_appearance(
+                &entity.appearance,
+                &entity.transform,
+                &mut circles,
+                &mut rectangles,
+            );
+        }
 
-            match &entity.appearance {
-                Appearance::Circle { radius, color } => {
-                    circles.push(CircleInstance {
-                        position: transform.position,
-                        radius: *radius,
-                        color: *color,
-                    });
-                }
+        (circles, rectangles)
+    }
 
-                Appearance::Rectangle {
-                    width,
-                    height,
-                    color,
-                } => {
+    fn process_appearance(
+        &self,
+        appearance: &Appearance,
+        transform: &crate::components::Transform,
+        circles: &mut Vec<CircleInstance>,
+        rectangles: &mut Vec<RectInstance>,
+    ) {
+        match appearance {
+            Appearance::Circle { radius, color } => {
+                circles.push(CircleInstance {
+                    position: transform.position,
+                    radius: *radius,
+                    color: *color,
+                });
+            }
+
+            Appearance::Polygon { vertices, color } => {
+                // For now, approximate polygons as rectangles for rendering
+                // A proper implementation would triangulate and render as separate geometry
+                if vertices.len() >= 4 {
+                    let min_x = vertices.iter().map(|v| v[0]).fold(f32::INFINITY, f32::min);
+                    let max_x = vertices
+                        .iter()
+                        .map(|v| v[0])
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    let min_y = vertices.iter().map(|v| v[1]).fold(f32::INFINITY, f32::min);
+                    let max_y = vertices
+                        .iter()
+                        .map(|v| v[1])
+                        .fold(f32::NEG_INFINITY, f32::max);
+
+                    let width = max_x - min_x;
+                    let height = max_y - min_y;
+
                     rectangles.push(RectInstance {
                         position: transform.position,
-                        length: *width,
-                        height: *height,
+                        length: width,
+                        height: height,
                         color: *color,
                         _padding: 0.0,
                     });
                 }
+            }
 
-                _ => {}
+            Appearance::Compound { parts } => {
+                for part in parts {
+                    self.process_appearance(part, transform, circles, rectangles);
+                }
             }
         }
+    }
+
+    pub fn render(&mut self, world: &World) {
+        self.frame_stats.render_count += 1;
+
+        // Collect render instances from Appearance components
+        let (circles, rectangles) = self.collect_instances_from_world(world);
 
         // Upload instance data
         if !circles.is_empty() {
@@ -445,64 +485,6 @@ impl Renderer {
                 0,
                 bytemuck::cast_slice(&rectangles),
             );
-        }
-
-        // Build text buffers from text entities
-        let mut text_buffers: Vec<glyphon::Buffer> = Vec::new();
-
-        for entity in world.entities() {
-            if let Appearance::Text {
-                content, font_size, ..
-            } = &entity.appearance
-            {
-                let mut buffer = glyphon::Buffer::new(
-                    &mut self.font_system,
-                    glyphon::Metrics::new(*font_size, font_size * 1.4),
-                );
-
-                buffer.set_size(&mut self.font_system, None, None);
-                buffer.set_text(
-                    &mut self.font_system,
-                    content,
-                    &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
-                    glyphon::Shaping::Advanced,
-                    None,
-                );
-                buffer.shape_until_scroll(&mut self.font_system, false);
-
-                text_buffers.push(buffer);
-            }
-        }
-
-        // Build text areas (screen-space positioning)
-        let mut text_areas: Vec<glyphon::TextArea> = Vec::new();
-        let mut text_index = 0;
-
-        for entity in world.entities() {
-            if let Appearance::Text { color, .. } = &entity.appearance {
-                let transform = &entity.transform;
-
-                let screen_x = ((transform.position[0] + 1.0) * 0.5) * self.size.width as f32;
-                let screen_y = ((1.0 - transform.position[1]) * 0.5) * self.size.height as f32;
-
-                if let Some(buffer) = text_buffers.get(text_index) {
-                    text_areas.push(glyphon::TextArea {
-                        buffer,
-                        left: screen_x,
-                        top: screen_y,
-                        scale: 1.0,
-                        bounds: glyphon::TextBounds::default(),
-                        default_color: glyphon::Color::rgb(
-                            (color[0] * 255.0) as u8,
-                            (color[1] * 255.0) as u8,
-                            (color[2] * 255.0) as u8,
-                        ),
-                        custom_glyphs: &[],
-                    });
-
-                    text_index += 1;
-                }
-            }
         }
 
         // Update glyphon viewport
@@ -526,8 +508,7 @@ impl Renderer {
             .max(margin)
             .round();
 
-        let mut all_text_areas = text_areas;
-        all_text_areas.push(glyphon::TextArea {
+        let text_areas = vec![glyphon::TextArea {
             buffer: &self.stats_buffer,
             left: stats_left,
             top: stats_top,
@@ -535,7 +516,7 @@ impl Renderer {
             bounds: glyphon::TextBounds::default(),
             default_color: glyphon::Color::rgb(255, 255, 160),
             custom_glyphs: &[],
-        });
+        }];
 
         self.text_renderer
             .prepare(
@@ -544,7 +525,7 @@ impl Renderer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                all_text_areas,
+                text_areas,
                 &mut self.swash_cache,
             )
             .unwrap();
