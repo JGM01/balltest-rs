@@ -1,5 +1,4 @@
 // src/components.rs
-use crate::collision_system::Collider;
 use crate::shape::Vec2;
 
 #[derive(Clone, Copy, Debug)]

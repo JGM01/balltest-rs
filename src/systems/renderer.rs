@@ -449,7 +449,7 @@ impl Renderer {
                     rectangles.push(RectInstance {
                         position: transform.position,
                         length: width,
-                        height: height,
+                        height,
                         color: *color,
                         _padding: 0.0,
                     });
@@ -569,7 +569,7 @@ impl Renderer {
             }
 
             self.text_renderer
-                .render(&mut self.atlas, &mut self.viewport, &mut render_pass)
+                .render(&self.atlas, &self.viewport, &mut render_pass)
                 .unwrap();
         }
 

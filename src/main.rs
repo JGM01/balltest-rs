@@ -8,19 +8,19 @@ mod shape;
 mod systems;
 mod world;
 
-use collision_system::{Collider, ShapeVariant};
+use collision_system::Collider;
 use components::{Appearance, Clickable, RigidBody, Transform};
 use entity::Entity;
-use shape::{Circle, CompoundShape, ConvexPolygon, ShapeClone, Vec2};
+use shape::{Circle, CompoundShape, ConvexPolygon};
 use systems::{InputCommand, InputSystem, PhysicsSystem, Renderer, TimeSystem};
 use world::World;
 
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 use crate::shape::Shape;
@@ -259,8 +259,8 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                if state == ElementState::Pressed {
-                    if let Some(cmd) = self.input_system.handle_mouse_button(button, true) {
+                if state == ElementState::Pressed
+                    && let Some(cmd) = self.input_system.handle_mouse_button(button, true) {
                         match cmd {
                             InputCommand::Click { position } => {
                                 // Spawn a dynamic circle
@@ -312,7 +312,6 @@ impl ApplicationHandler for App {
                             _ => {}
                         }
                     }
-                }
             }
 
             WindowEvent::KeyboardInput {
@@ -359,11 +358,10 @@ impl ApplicationHandler for App {
             }
         }
 
-        if needs_redraw {
-            if let Some(window) = &self.window {
+        if needs_redraw
+            && let Some(window) = &self.window {
                 window.request_redraw();
             }
-        }
 
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.time_system.next_wakeup()));
     }

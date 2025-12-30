@@ -65,18 +65,10 @@ impl InputSystem {
 
         match button {
             MouseButton::Left => {
-                if let Some(ndc) = self.cursor_ndc {
-                    Some(InputCommand::Click { position: ndc })
-                } else {
-                    None
-                }
+                self.cursor_ndc.map(|ndc| InputCommand::Click { position: ndc })
             }
             MouseButton::Right => {
-                if let Some(ndc) = self.cursor_ndc {
-                    Some(InputCommand::RightClick { position: ndc })
-                } else {
-                    None
-                }
+                self.cursor_ndc.map(|ndc| InputCommand::RightClick { position: ndc })
             }
             _ => None,
         }
